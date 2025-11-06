@@ -2,11 +2,13 @@ package main
 
 import (
 	proto "AquaWallahServer/grpc"
+	"bufio"
 	"fmt"
 	"net"
 	"os"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type AquaWallahServer struct {
@@ -22,8 +24,24 @@ func main() {
 		panic(err)
 	}
 	proto.RegisterAquaWallahServer(srv, &AquaWallahServer{})
-	err = srv.Serve(listerner)
-	if err != nil {
-		panic(err)
+
+	go func() {
+		if err := srv.Serve(listerner); err != nil {
+			panic(err)
+		}
+	}()
+
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		text := sc.Text()
+		if text == "" || len(text) > 128 {
+			continue
+		}
+		conn, err := grpc.Dial(text, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			fmt.Println("Failed to connect:", err)
+			continue
+		}
+		defer conn.Close()
 	}
 }
