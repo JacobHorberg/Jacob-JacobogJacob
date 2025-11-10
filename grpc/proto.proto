@@ -2,16 +2,22 @@ syntax = "proto3";
 option go_package = "AquaWallah/grpc";
 
 message Request {
-    int64 time = 1;
+    int64 timestamp = 1;
 }
 
 message Reply {
-    string message = 1;
+    int64 timestamp = 1;
+}
+
+message Server {
+    int64 timestamp = 1;
+    string port = 2;
 }
 
 message Empty {}
 
 service AquaWallah {
-    rpc SendRequest(Request) returns (Empty){}
-    rpc SendReply(Reply) returns (Empty){}
+    rpc SendRequest(Request) returns (Reply){}
+    rpc JoinNetwork(Server) returns (Empty){}
+    rpc LeaveNetwork(Server) returns (Empty){}
 }
