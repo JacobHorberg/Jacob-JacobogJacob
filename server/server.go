@@ -18,10 +18,12 @@ import (
 
 type AquaWallahServer struct {
 	proto.UnimplementedAquaWallahServer
-	port      string
-	servers   []Server
-	timestamp int64
-	mutex     sync.Mutex
+	port         string
+	servers      []Server
+	timestamp    int64
+	mutex        sync.Mutex
+	inCritical   bool
+	isRequesting bool
 }
 
 type Server struct {
@@ -59,24 +61,28 @@ func main() {
 	// TODO: listen for incoming connections
 	fmt.Println("usage:")
 	fmt.Println("  :<port number>    connect to a port on localhost")
-	fmt.Println("  request`          request access to the critical zone")
+	fmt.Println("  request           request access to the critical zone")
+	fmt.Println("  release           release access to the critical zone")
 	fmt.Println("to quit press ctrl+shitf+d")
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		actions := strings.Split(sc.Text(), " ")
 		for _, action := range actions {
+			if len(action) == 0 {
+				continue
+			}
 			if action[0] == ':' {
 				if action == aws.port {
 					fmt.Println("Refusing to connect to self")
 					continue
 				}
 				aws.mutex.Lock()
-				err := add_server(&aws, action)
+				conn, err := get_conn(action)
 				if err != nil {
 					fmt.Println("Failed to add server:", err)
 					continue
 				}
-				conn := aws.servers[len(aws.servers)-1].conn
+				aws.servers = append(aws.servers, Server{port: action, conn: conn})
 				c := proto.NewAquaWallahClient(conn)
 				ctx, cancel := context.WithCancel(context.Background())
 				aws.timestamp++
@@ -92,18 +98,28 @@ func main() {
 				cancel()
 				aws.mutex.Unlock()
 			} else if action == "request" {
+				aws.isRequesting = true
 				for _, srv := range aws.servers {
 					conn := srv.conn
 					c := proto.NewAquaWallahClient(conn)
 					ctx, cancel := context.WithCancel(context.Background())
 					aws.timestamp++
-					c.SendRequest(ctx, &proto.Request{})
+					c.SendRequest(ctx, &proto.Request{Timestamp: aws.timestamp})
 					cancel()
 				}
+				fmt.Println("Gained access to critical zone")
+				aws.isRequesting = false
+				aws.inCritical = true
+			} else if action == "release" {
+				if !aws.inCritical {
+					fmt.Println("Not in critical zone")
+					continue
+				}
+				fmt.Println("Released access to the critical zone")
+				aws.inCritical = false
 			} else {
 				fmt.Println("Invalid action:", action)
 			}
-			fmt.Println(aws.timestamp)
 		}
 	}
 
@@ -118,27 +134,36 @@ func main() {
 	}
 }
 
-func add_server(aws *AquaWallahServer, port string) error {
+func get_conn(port string) (*grpc.ClientConn, error) {
 	portRegex := "^:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])"
 	if match, err := regexp.MatchString(portRegex, port); !match {
-		return errors.New("Invalid port:" + port)
+		return nil, errors.New("Invalid port:" + port)
 	} else if err != nil {
-		return err
+		return nil, err
 	}
 
 	conn, err := grpc.NewClient(port, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	(*aws).servers = append((*aws).servers, Server{conn: conn, port: port})
-	return nil
+	return conn, err
 }
 
-func (aws *AquaWallahServer) SendRequest(ctx context.Context, in *proto.Request) (*proto.Reply, error) {
+func (aws *AquaWallahServer) SendRequest(ctx context.Context, req *proto.Request) (*proto.Reply, error) {
 	aws.mutex.Lock()
 	defer aws.mutex.Unlock()
-	fmt.Println("Stubbed out")
-	return &proto.Reply{}, nil
+	localTimestamp := aws.timestamp
+	foreignTimestamp := req.Timestamp
+	fmt.Println("Someone hase requested")
+	for {
+		if !aws.inCritical || (localTimestamp < foreignTimestamp && aws.isRequesting) {
+			break
+		}
+	}
+	aws.timestamp = max(aws.timestamp, req.Timestamp) + 1
+	fmt.Println("Allowing access to critical zone")
+
+	return &proto.Reply{Timestamp: aws.timestamp}, nil
 }
 
 func (aws *AquaWallahServer) JoinNetwork(ctx context.Context, server *proto.Server) (*proto.Empty, error) {
@@ -151,12 +176,12 @@ func (aws *AquaWallahServer) JoinNetwork(ctx context.Context, server *proto.Serv
 			return &proto.Empty{}, errors.New("Already connected to server on " + server.Port)
 		}
 	}
-	err := add_server(aws, string(server.Port))
+	conn, err := get_conn(string(server.Port))
 	if err != nil {
 		fmt.Println("Failed to add server:", err)
 		return &proto.Empty{}, err
 	}
-	aws.servers = append(aws.servers, Server{conn: aws.servers[len(aws.servers)-1].conn, port: string(server.Port)})
+	aws.servers = append(aws.servers, Server{port: string(server.Port), conn: conn})
 	fmt.Println("Server on port", server.Port, "successfully connected")
 
 	return &proto.Empty{}, nil
