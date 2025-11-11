@@ -24,6 +24,8 @@ type AquaWallahServer struct {
 	mutex        sync.Mutex
 	inCritical   bool
 	isRequesting bool
+	replys       int
+	queue        []string
 }
 
 type Server struct {
@@ -76,47 +78,30 @@ func main() {
 					fmt.Println("Refusing to connect to self")
 					continue
 				}
-				aws.mutex.Lock()
 				conn, err := get_conn(action)
 				if err != nil {
 					fmt.Println("Failed to add server:", err)
 					continue
 				}
-				aws.servers = append(aws.servers, Server{port: action, conn: conn})
-				c := proto.NewAquaWallahClient(conn)
-				ctx, cancel := context.WithCancel(context.Background())
-				aws.timestamp++
-				_, err = c.JoinNetwork(ctx, &proto.Server{Timestamp: aws.timestamp, Port: aws.port})
-				if err != nil {
-					fmt.Println("Failed to connect to", action+": ", err)
-					conn.Close()
-					aws.mutex.Unlock()
-					cancel()
-					continue
-				}
-				fmt.Println("Successfully connected to: " + action)
-				cancel()
-				aws.mutex.Unlock()
-			} else if action == "request" {
-				aws.isRequesting = true
-				for _, srv := range aws.servers {
-					conn := srv.conn
+				func() {
+					aws.mutex.Lock()
+					defer aws.mutex.Unlock()
+					aws.servers = append(aws.servers, Server{port: action, conn: conn})
 					c := proto.NewAquaWallahClient(conn)
 					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
 					aws.timestamp++
-					c.SendRequest(ctx, &proto.Request{Timestamp: aws.timestamp})
-					cancel()
-				}
-				fmt.Println("Gained access to critical zone")
-				aws.isRequesting = false
-				aws.inCritical = true
+					_, err = c.JoinNetwork(ctx, &proto.Server{Timestamp: aws.timestamp, Port: aws.port})
+					if err != nil {
+						fmt.Println("Failed to connect to", action+": ", err)
+						conn.Close()
+					}
+					fmt.Println("Successfully connected to: " + action)
+				}()
+			} else if action == "request" {
+				go aws.request_helper()
 			} else if action == "release" {
-				if !aws.inCritical {
-					fmt.Println("Not in critical zone")
-					continue
-				}
-				fmt.Println("Released access to the critical zone")
-				aws.inCritical = false
+				go aws.release_helper()
 			} else {
 				fmt.Println("Invalid action:", action)
 			}
@@ -149,21 +134,106 @@ func get_conn(port string) (*grpc.ClientConn, error) {
 	return conn, err
 }
 
-func (aws *AquaWallahServer) SendRequest(ctx context.Context, req *proto.Request) (*proto.Reply, error) {
-	aws.mutex.Lock()
-	defer aws.mutex.Unlock()
-	localTimestamp := aws.timestamp
-	foreignTimestamp := req.Timestamp
-	fmt.Println("Someone hase requested")
+func (aws *AquaWallahServer) release_helper() {
+	if !aws.inCritical {
+		fmt.Println("Not in critical zone")
+		return
+	}
+	fmt.Println("Released access to the critical zone")
+	aws.inCritical = false
+	for _, port := range aws.queue {
+		for _, srv := range aws.servers {
+			if port == srv.port {
+				c := proto.NewAquaWallahClient(srv.conn)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				aws.mutex.Lock()
+				aws.timestamp++
+				fmt.Printf("Allowing %s access to critical zone\n", port)
+				c.SendResponse(ctx, &proto.Request{Timestamp: aws.timestamp, Port: aws.port})
+				aws.mutex.Unlock()
+				break
+			}
+		}
+	}
+	aws.queue = aws.queue[:0]
+}
+
+func (aws *AquaWallahServer) request_helper() {
+	if aws.inCritical {
+		fmt.Println("Already in critical zone")
+		return
+	} else if aws.isRequesting {
+		fmt.Println("Already requesting access to critical zone")
+		return
+	}
+
+	aws.isRequesting = true
+	for _, srv := range aws.servers {
+		conn := srv.conn
+		c := proto.NewAquaWallahClient(conn)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		aws.mutex.Lock()
+		aws.timestamp++
+		aws.mutex.Unlock()
+		go c.SendRequest(ctx, &proto.Request{Timestamp: aws.timestamp, Port: aws.port})
+	}
+
+	serversConnected := len(aws.servers)
 	for {
-		if !aws.inCritical || (localTimestamp < foreignTimestamp && aws.isRequesting) {
+		receivedAllReplies := aws.replys == serversConnected
+		if receivedAllReplies {
 			break
 		}
 	}
-	aws.timestamp = max(aws.timestamp, req.Timestamp) + 1
-	fmt.Println("Allowing access to critical zone")
 
-	return &proto.Reply{Timestamp: aws.timestamp}, nil
+	aws.mutex.Lock()
+	aws.inCritical = true
+	aws.isRequesting = false
+	aws.mutex.Unlock()
+	aws.replys = 0
+
+	fmt.Println("Gained access to the critical zone")
+}
+
+func (aws *AquaWallahServer) SendRequest(ctx context.Context, req *proto.Request) (*proto.Empty, error) {
+	aws.mutex.Lock()
+	localTimestamp := aws.timestamp
+	foreignTimestamp := req.Timestamp
+	aws.timestamp = max(aws.timestamp, req.Timestamp) + 1
+	aws.mutex.Unlock()
+	fmt.Printf("%s has requested access (them=%d, us=%d)\n", req.Port, foreignTimestamp, localTimestamp)
+	if aws.inCritical || (aws.isRequesting && localTimestamp <= foreignTimestamp) {
+		aws.queue = append(aws.queue, req.Port)
+		return &proto.Empty{}, nil
+	}
+
+	var conn *grpc.ClientConn
+	for _, srv := range aws.servers {
+		if srv.port == req.Port {
+			conn = srv.conn
+			break
+		}
+	}
+
+	c := proto.NewAquaWallahClient(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	aws.mutex.Lock()
+	aws.timestamp++
+	fmt.Printf("Allowing %s access to critical zone", req.Port)
+	c.SendResponse(ctx, &proto.Request{Timestamp: aws.timestamp, Port: aws.port})
+	aws.mutex.Unlock()
+
+	return &proto.Empty{}, nil
+}
+
+func (aws *AquaWallahServer) SendResponse(ctx context.Context, res *proto.Request) (*proto.Empty, error) {
+	aws.timestamp = max(aws.timestamp, res.Timestamp) + 1
+	aws.replys += 1
+
+	return &proto.Empty{}, nil
 }
 
 func (aws *AquaWallahServer) JoinNetwork(ctx context.Context, server *proto.Server) (*proto.Empty, error) {

@@ -3,10 +3,12 @@ option go_package = "AquaWallah/grpc";
 
 message Request {
     int64 timestamp = 1;
+    string port = 2;
 }
 
 message Reply {
     int64 timestamp = 1;
+    string port = 2;
 }
 
 message Server {
@@ -17,7 +19,8 @@ message Server {
 message Empty {}
 
 service AquaWallah {
-    rpc SendRequest(Request) returns (Reply){}
+    rpc SendRequest(Request) returns (Empty){}
+    rpc SendResponse(Request) returns (Empty){}
     rpc JoinNetwork(Server) returns (Empty){}
     rpc LeaveNetwork(Server) returns (Empty){}
 }
