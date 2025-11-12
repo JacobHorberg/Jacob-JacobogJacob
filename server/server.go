@@ -66,7 +66,7 @@ func main() {
 	fmt.Println("  :<port number>    connect to a port on localhost")
 	fmt.Println("  request           request access to the critical zone")
 	fmt.Println("  release           release access to the critical zone")
-	fmt.Println("to quit press ctrl+shitf+d")
+	fmt.Println("to quit press ctrl+shitf+d (linux) or ctrl+z (windows) or ctrl+d (mac)")
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		actions := strings.Split(sc.Text(), " ")
