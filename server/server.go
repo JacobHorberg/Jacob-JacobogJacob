@@ -19,14 +19,15 @@ import (
 
 type AquaWallahServer struct {
 	proto.UnimplementedAquaWallahServer
-	port         string
-	servers      []Server
-	timestamp    int64
-	mutex        sync.Mutex
-	inCritical   bool
-	isRequesting bool
-	replys       int
-	queue        []string
+	port             string
+	servers          []Server
+	timestamp        int64
+	requestTimestamp int64
+	mutex            sync.Mutex
+	inCritical       bool
+	isRequesting     bool
+	replys           int
+	queue            []string
 }
 
 type Server struct {
@@ -169,16 +170,18 @@ func (aws *AquaWallahServer) request_helper() {
 		log.Println("Already requesting access to critical zone")
 		return
 	}
-
 	aws.isRequesting = true
+
+	aws.mutex.Lock()
+	aws.timestamp++
+	aws.requestTimestamp = aws.timestamp
+	aws.mutex.Unlock()
+
 	for _, srv := range aws.servers {
 		conn := srv.conn
 		c := proto.NewAquaWallahClient(conn)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		aws.mutex.Lock()
-		aws.timestamp++
-		aws.mutex.Unlock()
 		go c.SendRequest(ctx, &proto.Request{Timestamp: aws.timestamp, Port: aws.port})
 	}
 
@@ -201,7 +204,7 @@ func (aws *AquaWallahServer) request_helper() {
 
 func (aws *AquaWallahServer) SendRequest(ctx context.Context, req *proto.Request) (*proto.Empty, error) {
 	aws.mutex.Lock()
-	localTimestamp := aws.timestamp
+	localTimestamp := aws.requestTimestamp
 	foreignTimestamp := req.Timestamp
 	aws.timestamp = max(aws.timestamp, req.Timestamp) + 1
 	aws.mutex.Unlock()
